@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     # 数据库
     DATABASE_URL: str = "sqlite:///./data/compet.db"
     
+    # Genie API (优先)
+    GENIE_API_URL: str = "https://genie-data.hbo-erp.com/main/api/v1"
+    
     # Keepa API
     KEEPA_API_KEY: Optional[str] = None
     

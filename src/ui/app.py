@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.collectors.keepa import KeepaCollector
 from src.collectors.amazon_scraper import AmazonScraper
+from src.collectors.genie_api import GenieCollector
 from src.engines.review_analyzer import ReviewAnalyzer
 from src.models.database import init_db, get_db, Product, PriceHistory
 from src.config import settings
@@ -38,11 +39,12 @@ page = st.sidebar.radio(
 # 初始化采集器
 @st.cache_resource
 def get_collectors():
+    genie = GenieCollector()  # 优先使用 Genie API
     keepa = KeepaCollector() if settings.KEEPA_API_KEY else None
     scraper = AmazonScraper()
-    return keepa, scraper
+    return genie, keepa, scraper
 
-keepa_collector, scraper = get_collectors()
+genie_collector, keepa_collector, scraper = get_collectors()
 
 # 异步运行辅助函数
 def run_async(coro):
@@ -67,10 +69,13 @@ if page == "🏠 ASIN查询":
     if st.button("🔍 查询", type="primary"):
         if asin_input:
             with st.spinner("正在获取数据..."):
-                # 优先使用Keepa, 否则用爬虫
-                if keepa_collector:
+                # 优先使用 Genie API, 其次 Keepa, 最后爬虫
+                product = run_async(genie_collector.fetch_product(asin_input, marketplace))
+                
+                if not product and keepa_collector:
                     product = run_async(keepa_collector.fetch_product(asin_input, marketplace))
-                else:
+                
+                if not product:
                     product = run_async(scraper.fetch_product(asin_input, marketplace))
                 
                 if product:
@@ -106,34 +111,37 @@ if page == "🏠 ASIN查询":
                             st.write(f"**父ASIN:** {product.parent_asin or 'N/A'}")
                     
                     # 历史数据图表
-                    if keepa_collector:
-                        st.divider()
-                        st.subheader("📈 价格 & BSR 趋势")
-                        
+                    st.divider()
+                    st.subheader("📈 价格 & BSR 趋势")
+                    
+                    # 优先从 Genie API 获取历史数据
+                    history = run_async(genie_collector.fetch_price_history(asin_input, days=90))
+                    
+                    if not history and keepa_collector:
                         history = run_async(keepa_collector.fetch_price_history(asin_input, days=90))
                         
-                        if history:
-                            df = pd.DataFrame(history)
-                            df['date'] = pd.to_datetime(df['date'])
-                            
-                            fig = make_subplots(specs=[[{"secondary_y": True}]])
-                            
-                            fig.add_trace(
-                                go.Scatter(x=df['date'], y=df['price'], name="价格", line=dict(color='#1890FF')),
-                                secondary_y=False
-                            )
-                            fig.add_trace(
-                                go.Scatter(x=df['date'], y=df['bsr'], name="BSR", line=dict(color='#FF7A45')),
-                                secondary_y=True
-                            )
-                            
-                            fig.update_yaxes(title_text="价格 ($)", secondary_y=False)
-                            fig.update_yaxes(title_text="BSR 排名", secondary_y=True, autorange="reversed")
-                            fig.update_layout(height=400)
-                            
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("暂无历史数据")
+                    if history:
+                        df = pd.DataFrame(history)
+                        df['date'] = pd.to_datetime(df['date'])
+                        
+                        fig = make_subplots(specs=[[{"secondary_y": True}]])
+                        
+                        fig.add_trace(
+                            go.Scatter(x=df['date'], y=df['price'], name="价格", line=dict(color='#1890FF')),
+                            secondary_y=False
+                        )
+                        fig.add_trace(
+                            go.Scatter(x=df['date'], y=df['bsr'], name="BSR", line=dict(color='#FF7A45')),
+                            secondary_y=True
+                        )
+                        
+                        fig.update_yaxes(title_text="价格 ($)", secondary_y=False)
+                        fig.update_yaxes(title_text="BSR 排名", secondary_y=True, autorange="reversed")
+                        fig.update_layout(height=400)
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("暂无历史数据")
                     
                     # 操作按钮
                     st.divider()
@@ -228,8 +236,12 @@ elif page == "💬 Review分析":
     if st.button("📊 分析评论"):
         if asin:
             with st.spinner("正在抓取和分析评论..."):
-                # 抓取评论
-                reviews = run_async(scraper.fetch_reviews(asin, pages=3))
+                # 优先从 Genie API 获取评论
+                reviews = run_async(genie_collector.fetch_reviews(asin, pages=3))
+                
+                # 备用爬虫
+                if not reviews:
+                    reviews = run_async(scraper.fetch_reviews(asin, pages=3))
                 
                 if reviews:
                     # 转换为字典列表
