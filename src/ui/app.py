@@ -69,14 +69,14 @@ if page == "🏠 ASIN查询":
     if st.button("🔍 查询", type="primary"):
         if asin_input:
             with st.spinner("正在获取数据..."):
-                # 优先使用 Genie API, 其次 Keepa, 最后爬虫
-                product = run_async(genie_collector.fetch_product(asin_input, marketplace))
+                # 优先使用爬虫, 其次 Genie API, 最后 Keepa
+                product = run_async(scraper.fetch_product(asin_input, marketplace))
+                
+                if not product:
+                    product = run_async(genie_collector.fetch_product(asin_input, marketplace))
                 
                 if not product and keepa_collector:
                     product = run_async(keepa_collector.fetch_product(asin_input, marketplace))
-                
-                if not product:
-                    product = run_async(scraper.fetch_product(asin_input, marketplace))
                 
                 if product:
                     # 显示商品信息
@@ -236,12 +236,12 @@ elif page == "💬 Review分析":
     if st.button("📊 分析评论"):
         if asin:
             with st.spinner("正在抓取和分析评论..."):
-                # 优先从 Genie API 获取评论
-                reviews = run_async(genie_collector.fetch_reviews(asin, pages=3))
+                # 优先使用爬虫
+                reviews = run_async(scraper.fetch_reviews(asin, pages=3))
                 
-                # 备用爬虫
+                # 备用 Genie API
                 if not reviews:
-                    reviews = run_async(scraper.fetch_reviews(asin, pages=3))
+                    reviews = run_async(genie_collector.fetch_reviews(asin, pages=3))
                 
                 if reviews:
                     # 转换为字典列表
