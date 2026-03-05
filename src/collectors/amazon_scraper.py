@@ -66,14 +66,32 @@ class AmazonScraper(BaseCollector):
         brand_elem = soup.select_one("#bylineInfo") or soup.select_one(".po-brand .po-break-word")
         brand = brand_elem.get_text(strip=True).replace("Brand: ", "").replace("Visit the ", "").replace(" Store", "") if brand_elem else ""
         
-        # 解析价格
+        # 解析价格 (尝试多个选择器)
         price = None
-        price_elem = soup.select_one(".a-price .a-offscreen") or soup.select_one("#priceblock_ourprice")
-        if price_elem:
-            price_text = price_elem.get_text(strip=True)
-            price_match = re.search(r"[\d,.]+", price_text.replace(",", ""))
-            if price_match:
-                price = float(price_match.group())
+        price_selectors = [
+            "#corePrice_feature_div .a-offscreen",
+            "#apex_offerDisplay_desktop .a-offscreen",
+            ".priceToPay .a-offscreen",
+            ".a-price .a-offscreen",
+            "#priceblock_ourprice",
+            "#priceblock_dealprice",
+            ".a-price-whole",
+        ]
+        
+        for selector in price_selectors:
+            price_elem = soup.select_one(selector)
+            if price_elem:
+                price_text = price_elem.get_text(strip=True)
+                if price_text:
+                    # 提取数字 (处理各种货币符号和格式)
+                    price_match = re.search(r"[\d,.]+", price_text.replace(",", ""))
+                    if price_match:
+                        try:
+                            price = float(price_match.group().replace(",", ""))
+                            if price > 0:
+                                break
+                        except:
+                            continue
         
         # 解析评分
         rating = None
@@ -125,65 +143,98 @@ class AmazonScraper(BaseCollector):
             image_url=image_url
         )
     
+    def _parse_review_card(self, card) -> Optional[ReviewData]:
+        """解析单个评论卡片"""
+        try:
+            # 评论ID
+            review_id = card.get("id", "")
+            
+            # 评分
+            rating = 0
+            rating_elem = card.select_one("[data-hook='review-star-rating']") or card.select_one(".a-icon-star")
+            if rating_elem:
+                rating_text = rating_elem.get("title", "") or rating_elem.get_text()
+                rating_match = re.search(r"([\d.]+)", rating_text)
+                if rating_match:
+                    rating = int(float(rating_match.group(1)))
+            
+            # 标题
+            title_elem = card.select_one("[data-hook='review-title']") or card.select_one(".review-title")
+            title = title_elem.get_text(strip=True) if title_elem else ""
+            # 清理标题中的评分文字
+            title = re.sub(r'^\d+\.\d+ out of \d+ stars?', '', title).strip()
+            
+            # 内容
+            content_elem = card.select_one("[data-hook='review-body']") or card.select_one(".review-text")
+            content = content_elem.get_text(strip=True) if content_elem else ""
+            
+            # 如果没有内容，跳过
+            if not content and not title:
+                return None
+            
+            # VP标识
+            vp_elem = card.select_one("[data-hook='avp-badge']") or card.select_one(".a-color-success")
+            is_vp = vp_elem is not None and "Verified" in (vp_elem.get_text() if vp_elem else "")
+            
+            # 有用数
+            helpful = 0
+            helpful_elem = card.select_one("[data-hook='helpful-vote-statement']")
+            if helpful_elem:
+                helpful_match = re.search(r"(\d+)", helpful_elem.get_text())
+                if helpful_match:
+                    helpful = int(helpful_match.group(1))
+            
+            return ReviewData(
+                review_id=review_id,
+                rating=rating,
+                title=title,
+                content=content,
+                is_vp=is_vp,
+                helpful_votes=helpful
+            )
+        except Exception as e:
+            print(f"Parse review error: {e}")
+            return None
+    
     async def fetch_reviews(self, asin: str, pages: int = 5) -> List[ReviewData]:
-        """抓取评论"""
+        """抓取评论 - 从产品页获取"""
         reviews = []
-        base_url = f"https://www.amazon.com/product-reviews/{asin}"
+        seen_ids = set()
         
-        for page in range(1, pages + 1):
-            url = f"{base_url}?pageNumber={page}"
-            soup = await self._fetch_page(url)
-            
-            if not soup:
-                break
-            
-            review_cards = soup.select("[data-hook='review']")
+        # 从产品页获取评论
+        product_url = f"https://www.amazon.com/dp/{asin}"
+        soup = await self._fetch_page(product_url)
+        
+        if soup:
+            # 产品页上的评论选择器
+            review_cards = soup.select("[data-hook='review']") or soup.select(".review")
             
             for card in review_cards:
-                try:
-                    # 评论ID
-                    review_id = card.get("id", "")
-                    
-                    # 评分
-                    rating = 0
-                    rating_elem = card.select_one("[data-hook='review-star-rating']")
-                    if rating_elem:
-                        rating_text = rating_elem.get_text()
-                        rating_match = re.search(r"([\d.]+)", rating_text)
-                        if rating_match:
-                            rating = int(float(rating_match.group(1)))
-                    
-                    # 标题
-                    title_elem = card.select_one("[data-hook='review-title']")
-                    title = title_elem.get_text(strip=True) if title_elem else ""
-                    
-                    # 内容
-                    content_elem = card.select_one("[data-hook='review-body']")
-                    content = content_elem.get_text(strip=True) if content_elem else ""
-                    
-                    # VP标识
-                    vp_elem = card.select_one("[data-hook='avp-badge']")
-                    is_vp = vp_elem is not None
-                    
-                    # 有用数
-                    helpful = 0
-                    helpful_elem = card.select_one("[data-hook='helpful-vote-statement']")
-                    if helpful_elem:
-                        helpful_match = re.search(r"(\d+)", helpful_elem.get_text())
-                        if helpful_match:
-                            helpful = int(helpful_match.group(1))
-                    
-                    reviews.append(ReviewData(
-                        review_id=review_id,
-                        rating=rating,
-                        title=title,
-                        content=content,
-                        is_vp=is_vp,
-                        helpful_votes=helpful
-                    ))
-                except Exception as e:
-                    print(f"Parse review error: {e}")
+                review = self._parse_review_card(card)
+                if review and review.review_id not in seen_ids:
+                    reviews.append(review)
+                    seen_ids.add(review.review_id)
+        
+        # 尝试从评论页获取更多 (可能会被阻止)
+        if len(reviews) < pages * 5:
+            for page in range(1, min(pages, 3) + 1):
+                url = f"https://www.amazon.com/product-reviews/{asin}?pageNumber={page}&sortBy=recent"
+                soup = await self._fetch_page(url)
+                
+                if not soup:
                     continue
+                
+                # 检查是否被重定向到登录页
+                if soup.title and "Sign-In" in (soup.title.string or ""):
+                    break
+                
+                review_cards = soup.select("[data-hook='review']")
+                
+                for card in review_cards:
+                    review = self._parse_review_card(card)
+                    if review and review.review_id not in seen_ids:
+                        reviews.append(review)
+                        seen_ids.add(review.review_id)
         
         return reviews
     
